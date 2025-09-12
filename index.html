@@ -2,10 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1"
-    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Capstone 2025 Field Notes</title>
 
     <!-- Tailwind (utility classes) -->
@@ -17,7 +14,6 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <style>
-      /* small helpers so we don't need a build step */
       .input {
         width: 100%;
         border-radius: 0.75rem;
@@ -39,16 +35,15 @@
       .btn-danger:hover { background: rgb(153 27 27); }
       .btn-xs { padding: 0.25rem 0.5rem; font-size: 0.75rem; border-radius: 0.5rem; }
       .tabular-nums { font-variant-numeric: tabular-nums; }
+      .icon { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
     </style>
   </head>
   <body class="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 text-slate-900">
     <div id="root"></div>
 
     <script type="text/babel">
-      // ===== React hooks
       const { useState, useMemo, useEffect } = React;
 
-      // ===== Utilities
       const STORAGE_KEY = "fieldnotes_jobs_v1";
       const uuid = () => (crypto?.randomUUID ? crypto.randomUUID() : ("id-" + Math.random().toString(16).slice(2)));
 
@@ -61,8 +56,10 @@
         notes: "",
         stations: [],
         observations: [],
-        level_loops: [],   // levelling loops (metadata)
-        level_legs: [],    // levelling legs (observations)
+        level_loops: [],
+        level_legs: [],
+        // NEW: persisted traverse path (ordered station codes)
+        traverse_path: [],
       });
 
       const clampNum = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -79,11 +76,20 @@
         return sign * (dd + mm / 60 + ss / 3600);
       };
 
+      const decimalToDMS = (deg) => {
+        const sign = deg < 0 ? -1 : 1;
+        let d = Math.abs(deg);
+        const D = Math.floor(d);
+        d = (d - D) * 60;
+        const M = Math.floor(d);
+        const S = (d - M) * 60;
+        return { sign, d: String(D), m: String(M), s: S.toFixed(6) };
+      };
+
       const OBSERVATION_COLUMNS = [
         "station_code","target_code","round_id","face","hz_deg","z_deg","slope_m","ih_m","th_m","timestamp","notes",
       ];
 
-      // generic CSV builder for arbitrary columns
       const toCsvWithColumns = (rows, columns) => {
         const head = columns.join(",");
         const body = rows
@@ -97,10 +103,8 @@
         return head + "\n" + body;
       };
 
-      // legacy observation CSV (kept as-is)
       const toCsv = (rows) => toCsvWithColumns(rows, OBSERVATION_COLUMNS);
 
-      // ===== UI bits
       function Field({ label, children, required = false, hint }) {
         return (
           <label className="flex flex-col gap-1 text-sm">
@@ -112,7 +116,7 @@
           </label>
         );
       }
-
+        
       function Section({ title, children, right }) {
         return (
           <section className="bg-white/60 backdrop-blur rounded-2xl shadow p-4 md:p-6 border border-gray-200">
@@ -125,7 +129,6 @@
         );
       }
 
-      // ===== App
       function FieldNotesApp() {
         const [jobs, setJobs] = useState(() => {
           try {
@@ -163,11 +166,37 @@
         const [tab, setTab] = useState("obs"); // "stations" | "obs" | "levelling" | "review"
         const [angleMode, setAngleMode] = useState("decimal"); // or "dms"
 
-        // Station form
-        const [stationForm, setStationForm] = useState({ code: "", e: "", n: "", h: "", ih: "" });
+        // Station form (with initial bearing decimal + DMS boxes)
+        const [stationForm, setStationForm] = useState({
+          code: "", e: "", n: "", h: "", ih: "",
+          initial_bearing_deg: "",
+          ib_d: "", ib_m: "", ib_s: "", ib_sign: 1,
+        });
+
+        // Prefill DMS boxes when toggling
+        useEffect(() => {
+          if (angleMode === "dms" && stationForm.initial_bearing_deg !== "") {
+            const val = Number(stationForm.initial_bearing_deg);
+            if (isFinite(val)) {
+              const dms = decimalToDMS(wrap360(val));
+              setStationForm(f => ({ ...f, ib_d: dms.d, ib_m: dms.m, ib_s: dms.s, ib_sign: dms.sign }));
+            }
+          }
+        }, [angleMode]); // eslint-disable-line
+
         const addStation = () => {
           if (!activeJob) return;
           if (!stationForm.code.trim()) return alert("Station code is required");
+
+          let initial_bearing_deg = null;
+          if (angleMode === "dms") {
+            const val = dmsToDecimal(stationForm.ib_d, stationForm.ib_m, stationForm.ib_s, stationForm.ib_sign || 1);
+            if (isFinite(val)) initial_bearing_deg = wrap360(val);
+          } else if (stationForm.initial_bearing_deg !== "") {
+            const val = Number(stationForm.initial_bearing_deg);
+            if (isFinite(val)) initial_bearing_deg = wrap360(val);
+          }
+
           const st = {
             id: uuid(),
             code: stationForm.code.trim(),
@@ -175,13 +204,14 @@
             n: stationForm.n ? Number(stationForm.n) : null,
             h: stationForm.h ? Number(stationForm.h) : null,
             ih: stationForm.ih ? Number(stationForm.ih) : null,
+            initial_bearing_deg,
             timestamp: new Date().toISOString(),
           };
           updateJob({ stations: [st, ...(activeJob.stations || [])] });
-          setStationForm({ code: "", e: "", n: "", h: "", ih: "" });
+          setStationForm({ code: "", e: "", n: "", h: "", ih: "", initial_bearing_deg: "", ib_d: "", ib_m: "", ib_s: "", ib_sign: 1 });
         };
 
-        // Observation form (angles/distances)
+        // Observation form
         const [obsForm, setObsForm] = useState({
           station_code: "",
           target_code: "",
@@ -201,20 +231,17 @@
             <Field label="°">
               <input type="number" inputMode="numeric" className="w-20 input"
                 value={obsForm[key].d}
-                onChange={(e) => setObsForm(f => ({ ...f, [key]: { ...f[key], d: e.target.value } }))}
-              />
+                onChange={(e) => setObsForm(f => ({ ...f, [key]: { ...f[key], d: e.target.value } }))}/>
             </Field>
             <Field label="′">
               <input type="number" inputMode="numeric" className="w-20 input"
                 value={obsForm[key].m}
-                onChange={(e) => setObsForm(f => ({ ...f, [key]: { ...f[key], m: e.target.value } }))}
-              />
+                onChange={(e) => setObsForm(f => ({ ...f, [key]: { ...f[key], m: e.target.value } }))}/>
             </Field>
             <Field label="″">
               <input type="number" inputMode="decimal" className="w-24 input"
                 value={obsForm[key].s}
-                onChange={(e) => setObsForm(f => ({ ...f, [key]: { ...f[key], s: e.target.value } }))}
-              />
+                onChange={(e) => setObsForm(f => ({ ...f, [key]: { ...f[key], s: e.target.value } }))}/>
             </Field>
           </div>
         );
@@ -256,8 +283,7 @@
           updateJob({ observations: activeJob.observations.filter(o => o.id !== id) });
         };
 
-        // ===== Levelling (loops + legs)
-        // Loop metadata form
+        // Levelling forms (unchanged) ...
         const [levelLoopForm, setLevelLoopForm] = useState({
           loop_code: "",
           start_control: "",
@@ -283,18 +309,12 @@
           };
           updateJob({ level_loops: [loop, ...(activeJob.level_loops || [])] });
           setLevelLoopForm({
-            loop_code: "",
-            start_control: "",
-            start_elev_m: "",
-            end_control: "",
-            end_elev_known_m: "",
-            date: new Date().toISOString().slice(0,10),
-            notes: "",
+            loop_code: "", start_control: "", start_elev_m: "", end_control: "",
+            end_elev_known_m: "", date: new Date().toISOString().slice(0,10), notes: "",
           });
           setSelectedLoopId(loop.id);
         };
 
-        // Leg form
         const [selectedLoopId, setSelectedLoopId] = useState("");
         const [levelLegForm, setLevelLegForm] = useState({
           loop_id: "",
@@ -332,14 +352,9 @@
           };
           updateJob({ level_legs: [leg, ...(activeJob.level_legs || [])] });
           setLevelLegForm({
-            loop_id,
-            leg_no: (Number(levelLegForm.leg_no || "1") + 1).toString(),
-            from_point: "",
-            to_point: "",
-            bs_m: "",
-            fs_m: "",
-            timestamp: new Date().toISOString().slice(0,19),
-            notes: "",
+            loop_id, leg_no: (Number(levelLegForm.leg_no || "1") + 1).toString(),
+            from_point: "", to_point: "", bs_m: "", fs_m: "",
+            timestamp: new Date().toISOString().slice(0,19), notes: "",
           });
         };
 
@@ -348,7 +363,6 @@
           updateJob({ level_legs: activeJob.level_legs.filter(l => l.id !== id) });
         };
 
-        // Helpers to compute loop summaries
         const currentLoop = useMemo(() => {
           if (!activeJob) return null;
           return (activeJob.level_loops || []).find(l => l.id === selectedLoopId) || null;
@@ -370,7 +384,64 @@
           return { sum_dh, computedEnd, knownEnd, closure };
         }, [legsForCurrentLoop, currentLoop]);
 
-        // ===== Exports
+        // ---------- NEW: Traverse Path (closed loop) ----------
+        const traversePath = activeJob?.traverse_path || [];
+        const [traverseInput, setTraverseInput] = useState("");
+
+        const setTraversePath = (arr) => updateJob({ traverse_path: arr });
+
+        const addTraverseStation = () => {
+          if (!activeJob) return;
+          const code = (traverseInput || "").trim();
+          if (!code) return;
+          setTraversePath([...(traversePath || []), code]);
+          setTraverseInput("");
+        };
+
+        const removeTraverseIndex = (idx) => {
+          const next = [...traversePath];
+          next.splice(idx, 1);
+          setTraversePath(next);
+        };
+
+        const moveTraverseUp = (idx) => {
+          if (idx <= 0) return;
+          const next = [...traversePath];
+          [next[idx-1], next[idx]] = [next[idx], next[idx-1]];
+          setTraversePath(next);
+        };
+
+        const moveTraverseDown = (idx) => {
+          if (idx >= traversePath.length - 1) return;
+          const next = [...traversePath];
+          [next[idx+1], next[idx]] = [next[idx], next[idx+1]];
+          setTraversePath(next);
+        };
+
+        const clearTraversePath = () => setTraversePath([]);
+
+        const exportTraverseNodesCSV = () => {
+          if (!activeJob) return;
+          const path = traversePath || [];
+          if (path.length < 2) {
+            alert("Add at least two stations to define a closed path.");
+            return;
+          }
+          // Auto-close the loop by repeating first at the end if not already closed
+          const closed = (path[0] === path[path.length - 1]);
+          const out = closed ? path.slice() : [...path, path[0]];
+
+          const rows = out.map((code, i) => ({ seq: i + 1, station_code: code }));
+          const csv = toCsvWithColumns(rows, ["seq","station_code"]);
+          const fname = `${(activeJob.name || "job").replaceAll(" ","_")}_traverse_nodes.csv`;
+          const blob = new Blob([csv], { type: "text/csv" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = fname; a.click();
+          URL.revokeObjectURL(url);
+        };
+        // ------------------------------------------------------
+
         const exportJSON = () => {
           if (!activeJob) return;
           const fname = `${(activeJob.name || "job").replaceAll(" ","_")}_observations.json`;
@@ -392,7 +463,6 @@
           URL.revokeObjectURL(url);
         };
 
-        // export levelling loops
         const exportLevelLoopsCSV = () => {
           if (!activeJob) return;
           const cols = ["loop_code","date","start_control","start_elev_m","end_control","end_elev_known_m","notes"];
@@ -414,7 +484,6 @@
           URL.revokeObjectURL(url);
         };
 
-        // export levelling legs (with loop_code joined in)
         const exportLevelLegsCSV = () => {
           if (!activeJob) return;
           const loopCodeById = Object.fromEntries((activeJob.level_loops || []).map(l => [l.id, l.loop_code]));
@@ -544,6 +613,38 @@
                       <input type="number" inputMode="decimal" className="input" value={stationForm.h}
                         onChange={(e) => setStationForm(f => ({ ...f, h: e.target.value }))} />
                     </Field>
+
+                    {/* Initial bearing (decimal or DMS) */}
+                    <div className="md:col-span-2">
+                      <span className="text-sm font-medium text-gray-800">Initial bearing (azimuth of first observation)</span>
+                      <div className="mt-1">
+                        {angleMode === "decimal" ? (
+                          <Field hint="Decimal 0–360°; used later for orientation corrections">
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              className="input"
+                              placeholder="e.g., 217.418"
+                              value={stationForm.initial_bearing_deg}
+                              onChange={(e) => setStationForm(f => ({ ...f, initial_bearing_deg: e.target.value }))}
+                            />
+                          </Field>
+                        ) : (
+                          <div className="flex items-end gap-2">
+                            <Field label="°"><input type="number" inputMode="numeric" className="w-20 input"
+                              value={stationForm.ib_d}
+                              onChange={(e) => setStationForm(f => ({ ...f, ib_d: e.target.value }))} /></Field>
+                            <Field label="′"><input type="number" inputMode="numeric" className="w-20 input"
+                              value={stationForm.ib_m}
+                              onChange={(e) => setStationForm(f => ({ ...f, ib_m: e.target.value }))} /></Field>
+                            <Field label="″"><input type="number" inputMode="decimal" className="w-24 input"
+                              value={stationForm.ib_s}
+                              onChange={(e) => setStationForm(f => ({ ...f, ib_s: e.target.value }))} /></Field>
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">Stored as decimal degrees; normalized to [0, 360).</div>
+                    </div>
                   </div>
                   <div className="mt-4 flex justify-end">
                     <button className="btn" onClick={addStation}>Add Station</button>
@@ -591,7 +692,7 @@
               </div>
             )}
 
-            {/* Observations (angles/distances) */}
+            {/* Observations */}
             {activeJob && tab === "obs" && (
               <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
                 <Section title="Add observation">
@@ -618,7 +719,7 @@
                       </select>
                     </Field>
 
-                    {/* HZ */}
+                    {/* Hz */}
                     <div className="md:col-span-2">
                       <span className="text-sm font-medium text-gray-800">Horizontal angle (Hz)</span>
                       <div className="mt-1">
@@ -726,7 +827,6 @@
             {/* Levelling */}
             {activeJob && tab === "levelling" && (
               <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {/* Loop setup */}
                 <Section title="Levelling loop setup">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <Field label="Loop code" required>
@@ -771,7 +871,6 @@
                   </div>
                 </Section>
 
-                {/* Loops list + select */}
                 <Section
                   title="Loops"
                   right={
@@ -815,7 +914,6 @@
                   )}
                 </Section>
 
-                {/* Add leg */}
                 <Section title="Add level leg">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <Field label="Loop">
@@ -868,75 +966,6 @@
               </div>
             )}
 
-            {/* Levelling loop overview (when a loop is selected) */}
-            {activeJob && tab === "levelling" && selectedLoopId && (
-              <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <Section title="Loop summary">
-                  {currentLoop ? (
-                    <div className="text-sm space-y-2">
-                      <div><b>Loop:</b> {currentLoop.loop_code}</div>
-                      <div><b>Start:</b> {currentLoop.start_control || "—"} {currentLoop.start_elev_m!=null ? `(Elev ${currentLoop.start_elev_m} m)` : ""}</div>
-                      <div><b>End:</b> {currentLoop.end_control || "—"} {currentLoop.end_elev_known_m!=null ? `(Known ${currentLoop.end_elev_known_m} m)` : ""}</div>
-                      <div className="p-3 bg-white rounded border mt-2">
-                        <div>Σ Δh = <b>{(loopTotals.sum_dh ?? 0).toFixed(3)} m</b></div>
-                        <div>Computed end elev = <b>{loopTotals.computedEnd!=null ? loopTotals.computedEnd.toFixed(3) + " m" : "—"}</b></div>
-                        <div>Closure (computed − known) = <b>{loopTotals.closure!=null ? loopTotals.closure.toFixed(3) + " m" : "—"}</b></div>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-sm text-gray-600">Select a loop to view summary.</p>
-                  )}
-                </Section>
-
-                <Section title="Legs in this loop" right={<span className="text-sm text-gray-500">{legsForCurrentLoop.length} legs</span>}>
-                  {legsForCurrentLoop.length === 0 ? (
-                    <p className="text-sm text-gray-600">No legs added yet.</p>
-                  ) : (
-                    <div className="overflow-auto max-h-[520px]">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="text-left text-gray-600">
-                            <th className="p-2">Leg</th>
-                            <th className="p-2">From</th>
-                            <th className="p-2">To</th>
-                            <th className="p-2">BS (m)</th>
-                            <th className="p-2">FS (m)</th>
-                            <th className="p-2">Δh (m)</th>
-                            <th className="p-2">Time</th>
-                            <th className="p-2"></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {legsForCurrentLoop.map(l => (
-                            <tr key={l.id} className="border-t hover:bg-gray-50">
-                              <td className="p-2">{l.leg_no}</td>
-                              <td className="p-2">{l.from_point}</td>
-                              <td className="p-2">{l.to_point}</td>
-                              <td className="p-2">{l.bs_m ?? ""}</td>
-                              <td className="p-2">{l.fs_m ?? ""}</td>
-                              <td className="p-2">{l.delta_h_m!=null ? l.delta_h_m.toFixed(3) : ""}</td>
-                              <td className="p-2 whitespace-nowrap">{l.timestamp?.replace("T"," ")}</td>
-                              <td className="p-2 text-right">
-                                <button className="btn btn-danger btn-xs" onClick={() => deleteLevelLeg(l.id)}>Delete</button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </Section>
-
-                <Section title="Notes">
-                  <ul className="list-disc pl-5 text-sm text-gray-700 space-y-2">
-                    <li>Enter BS and FS for each leg; Δh is computed as BS − FS.</li>
-                    <li>If you provide a start elevation, we compute the end elevation.</li>
-                    <li>If you also provide a known end elevation, we show the closure.</li>
-                  </ul>
-                </Section>
-              </div>
-            )}
-
             {/* Review & export */}
             {activeJob && tab === "review" && (
               <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -955,7 +984,6 @@
                   <div className="flex flex-col gap-2">
                     <button className="btn" onClick={exportJSON}>Export full job (JSON)</button>
                     <button className="btn" onClick={exportCSV}>Export observations (CSV)</button>
-                    {/* NEW buttons */}
                     <button className="btn" onClick={exportLevelLoopsCSV}>Export levelling loops (CSV)</button>
                     <button className="btn" onClick={exportLevelLegsCSV}>Export levelling legs (CSV)</button>
                   </div>
@@ -969,6 +997,62 @@
                     <li>Analysis tab (FL/FR pairing, stats, QC) + levelling checks + reports.</li>
                   </ol>
                 </Section>
+
+                {/* NEW: Traverse path (closed loop) */}
+                <Section
+                  title="Traverse path (closed loop)"
+                  right={<span className="text-sm text-gray-500">{(activeJob.traverse_path||[]).length} in path</span>}
+                >
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <Field label="Add station to path" hint="Use station codes exactly as in Stations">
+                      <input className="input" list="stations_list" placeholder="e.g., TP01"
+                        value={traverseInput}
+                        onChange={(e)=>setTraverseInput(e.target.value)}
+                        onKeyDown={(e)=>{ if(e.key==='Enter'){ addTraverseStation(); } }} />
+                      <datalist id="stations_list">
+                        {(activeJob.stations || []).map(s => <option key={s.id} value={s.code} />)}
+                      </datalist>
+                    </Field>
+                    <div className="flex items-end">
+                      <button className="btn" onClick={addTraverseStation}>Add</button>
+                    </div>
+                  </div>
+
+                  {(traversePath || []).length === 0 ? (
+                    <p className="text-sm text-gray-600 mt-3">No path yet. Add stations in order (start → … → last). We’ll repeat the first at the end on export to close the loop.</p>
+                  ) : (
+                    <div className="mt-3">
+                      <ul className="space-y-2">
+                        {traversePath.map((code, i) => (
+                          <li key={`${code}-${i}`} className="flex items-center justify-between bg-white rounded border p-2">
+                            <div className="text-sm"><b>{i+1}.</b> {code}</div>
+                            <div className="flex items-center gap-2">
+                              <button className="btn btn-xs" onClick={()=>moveTraverseUp(i)} title="Move up">↑</button>
+                              <button className="btn btn-xs" onClick={()=>moveTraverseDown(i)} title="Move down">↓</button>
+                              <button className="btn btn-danger btn-xs" onClick={()=>removeTraverseIndex(i)} title="Remove">Remove</button>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+
+                      <div className="text-xs text-gray-600 mt-2">
+                        Preview: {traversePath.join(" → ")}{traversePath.length>0 ? " → " + traversePath[0] : ""}
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button className="btn" onClick={exportTraverseNodesCSV}>Export traverse path (CSV)</button>
+                        <button className="btn btn-danger" onClick={clearTraversePath}>Clear</button>
+                      </div>
+
+                      <div className="text-xs text-gray-500 mt-2">
+                        Export creates <code>{(activeJob.name || "job").replaceAll(" ","_")}_traverse_nodes.csv</code> with columns <code>seq,station_code</code>. The first station is automatically repeated at the end to close the loop (if not already).
+                      </div>
+                      <div className="text-xs text-gray-600 mt-2">
+                        Tip: for each traverse leg A→B, record an observation where <b>Station code = A</b> and <b>Target code = B</b> so ingest can match legs unambiguously.
+                      </div>
+                    </div>
+                  )}
+                </Section>
               </div>
             )}
 
@@ -977,7 +1061,6 @@
         );
       }
 
-      // mount app
       const root = ReactDOM.createRoot(document.getElementById("root"));
       root.render(<FieldNotesApp />);
     </script>
